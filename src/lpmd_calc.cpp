@@ -98,12 +98,7 @@ void usage(){
 }
 
 int main(int argc, char* argv[]) {
-    /*
-    * 
-    *
-    */
     if(argc<4) {usage(); return 1;}
-
 
     ifstream file(argv[1]);
     string line; 
@@ -122,7 +117,7 @@ int main(int argc, char* argv[]) {
     unordered_map<string, int> rownames;
     vector<vector<double>> fields;
     int jj = 0;
-    printf("Reading %s\n",argv[1]);
+    cerr << "Read:\t" << argv[1] << endl;
     while(getline(file, line)){
         string line_;
         istringstream iss1(line);
@@ -142,7 +137,7 @@ int main(int argc, char* argv[]) {
 
 
     // <ilmnMap_mat> *ptr allocation
-    printf("Building matrix of %s : %d x %d\n", argv[1], fields.size(), columnNames.size()-1);
+    cerr << "Build:\t" << "Matrix of " << argv[1] << " : " << fields.size() << " x " << columnNames.size()-1 << endl;
     MatrixXd ilmnMap_mat(fields.size(), columnNames.size()-1);
     for(int i=0; i < fields.size(); i++){
         for(int j=1; j < columnNames.size(); j++){
@@ -153,7 +148,7 @@ int main(int argc, char* argv[]) {
     file.close();
 
 
-    cout << "Reading distMap into distVec" << endl;
+    cerr << "Build:\tdistMap into distVec" << endl;
     // Reading distMap into distVec
     vector<vector<string>> distVec;
     vector<string> chr_vec, cgid1_vec, cgid2_vec, distance_vec;
@@ -174,37 +169,25 @@ int main(int argc, char* argv[]) {
     }
     distFile.close();
 
-    cout << "Making sparse substraction matrix" << endl;
+    cerr << "Calc:\tSparse substraction matrix" << endl;
 
     // Making sparse substraction matrix
-
 
     vector<vector<int>> A_index;
     for (int i=0; i < distVec.size(); i++){
         string& cgid_this = distVec[i][1];
         string& cgid_that = distVec[i][2];
+        string& cgid_dist = distVec[i][3];
 
         auto index_this_it = rownames.find(cgid_this);
         auto index_that_it = rownames.find(cgid_that);
         if(index_that_it != rownames.end() && index_this_it != rownames.end()){
             int index_this = rownames[cgid_this];
             int index_that = rownames[cgid_that];
-            A_index.push_back({i, index_this, index_that});
+            A_index.push_back({i, index_this, index_that, stoi(cgid_dist)});
         }
-        /*}
-        auto index_this_it = rownames.find(cgid_this);
-        auto index_that_it = rownames.find(cgid_that);
-        if(index_that_it != rownames.end() && index_this_it != rownames.end()){
-            A_index.push_back(i);
-            int index_this = rownames[cgid_this];
-            int index_that = rownames[cgid_that];
-
-            A.insert(j,index_this) = 1; 
-            A.insert(j,index_that) = -1;
-            j++;
-            A.conservativeResize(j+1,rownames.size());
-        }*/
     }
+
     vector<Triplet<double>> triplets;
     for (int i = 0; i < A_index.size(); i++) {
         triplets.push_back(Triplet<double>(i, A_index[i][1], 1.0));
@@ -224,9 +207,10 @@ int main(int argc, char* argv[]) {
     lpmd = A * ilmnMap_mat;
 
 
-    cout << "Writing whole LPMD result" << endl;
+    cerr << "Write:\twhole LPMD result" << endl;
     // writing whole lpmd output
-    string lpmd_res = strcat(argv[3], "_whole_list.txt");
+    string lpmd_res = argv[3];
+    lpmd_res += "_whole_list.txt";
     lpmd_header(lpmd_res, columnNames);
 
     ofstream(output);
@@ -246,8 +230,57 @@ int main(int argc, char* argv[]) {
     output.close();
 
 
-    cout << "Writing LPMD stats result" << endl;
-    string lpmd_stats = strcat(argv[3], "_stats.txt");
+
+    cerr << "Calc:\tCumulative lpmd output" << endl;
+    // cumulative lpmd score Matrix build
+    vector<Triplet<double>> triplets_cum_lpmd;
+    vector<int> t_cum_lpmd;
+    for(int i =0; i<100; i++){
+        t_cum_lpmd.push_back(0);
+    }
+    for(int i=0; i < A_index.size(); i++){
+        triplets_cum_lpmd.push_back(Triplet<double>(A_index[i][3], i, 1.0));
+        t_cum_lpmd[A_index[i][3]-1]++;
+    }
+    SparseMatrix<double> B(100,A_index.size());
+    B.setFromTriplets(triplets_cum_lpmd.begin(), triplets_cum_lpmd.end());
+    B.makeCompressed();
+
+    // Matrix multiplication
+    MatrixXd cum_lpmd(100, columnNames.size()-1);
+    MatrixXd cum_lpmd_mean(100, columnNames.size()-1);
+    cum_lpmd = B * lpmd.cwiseAbs();
+
+    for(int i = 0; i < 100; i++){
+        cum_lpmd_mean.row(i) = cum_lpmd.row(i) / t_cum_lpmd[i];
+
+    }
+
+    cerr << "Write:\tCumulative lpmd" << endl;
+    string cum_lpmd_res = argv[3];
+    cum_lpmd_res += "_cumul.txt";
+    ofstream(output_cum_lpmd_res);
+    output_cum_lpmd_res.open(cum_lpmd_res); 
+    output_cum_lpmd_res << "Dist";
+    for(int i=1; i < columnNames.size(); i++){
+        output_cum_lpmd_res << '\t' << columnNames[i];
+    }
+    output_cum_lpmd_res << endl;
+    for(int i=0; i < 100; i++){
+        output_cum_lpmd_res << i+1;
+        for(int j=0; j < cum_lpmd_mean.cols(); j++){
+            output_cum_lpmd_res << '\t' << cum_lpmd_mean(i,j);
+        }
+        output_cum_lpmd_res << endl;
+    }
+    output_cum_lpmd_res.close();
+
+
+
+
+    cerr << "Write:\tLPMD stats result" << endl;
+    string lpmd_stats = argv[3];
+    lpmd_stats += "_stats.txt";
     ofstream(output_stats);
     output_stats.open(lpmd_stats);
     output_stats << "SampleID\tMean\tMedian\tIQR\tsd" << endl;
