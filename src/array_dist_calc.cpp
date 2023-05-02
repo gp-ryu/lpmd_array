@@ -19,7 +19,7 @@ unordered_map <string, vector<pair<string, int>>> read_array_pos_map_file(string
    while(getline(file, line)){
        istringstream iss(line);
        string chr, cgID;
-       double pos; 
+       int pos; 
 
        getline(iss, chr, '\t');
        getline(iss, cgID, '\t');
@@ -31,11 +31,11 @@ unordered_map <string, vector<pair<string, int>>> read_array_pos_map_file(string
 }
 
 // Function to calculate the distance between two coordinates
-double distance(double x1, double x2) {
+int distance(int x1, int x2) {
     return abs(x1 - x2);
 }
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     if(argc < 2) {
         cerr << "Please provide the input file name as a command-line argumant." << endl;
         return 1;
@@ -57,10 +57,10 @@ int main(int argc, char *argv[]) {
         vector<pair<string, int>>& records = group.second;
         for (int i = 0; i < records.size(); i++) {
             for (int j = i + 1; j < records.size(); j++) {
-                double dist = distance(records[i].second, records[j].second);
-                if (dist < 100) {
+                int dist = distance(records[i].second, records[j].second);
+                if (dist <= 100) {
                     cout << group.first << '\t' << records[i].first << '\t' << records[j].first << '\t' << dist << endl;
-                }
+                }else break;
             }
         }
     }
