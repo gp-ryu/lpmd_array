@@ -9,6 +9,8 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <stdint.h>
+#include <omp.h>
+#include <thread>
 
 using namespace Eigen;
 using namespace std;
@@ -111,7 +113,7 @@ int main(int argc, char* argv[]) {
     while (getline(iss1, column, '\t')){
         columnNames.push_back(column);
     }
-    
+     
 
     // <rownames , fields> read and allocation
     unordered_map<string, int> rownames;
@@ -169,11 +171,12 @@ int main(int argc, char* argv[]) {
     }
     distFile.close();
 
-    cerr << "Calc:\tSparse substraction matrix" << endl;
+    cerr << "Build:\tSparse substraction matrix" << endl;
 
     // Making sparse substraction matrix
 
-    vector<vector<int>> A_index;
+    vector<vector<int>> pairIdxV;
+    unordered_map<int, vector<vector<string>>> pairIdxV_dist;
     for (int i=0; i < distVec.size(); i++){
         string& cgid_this = distVec[i][1];
         string& cgid_that = distVec[i][2];
@@ -184,27 +187,42 @@ int main(int argc, char* argv[]) {
         if(index_that_it != rownames.end() && index_this_it != rownames.end()){
             int index_this = rownames[cgid_this];
             int index_that = rownames[cgid_that];
-            A_index.push_back({i, index_this, index_that, stoi(cgid_dist)});
+            pairIdxV.push_back({i, index_this, index_that, stoi(cgid_dist)});
+            pairIdxV_dist[stoi(cgid_dist)].push_back({cgid_this, cgid_that});
         }
     }
 
-    vector<Triplet<double>> triplets;
-    for (int i = 0; i < A_index.size(); i++) {
-        triplets.push_back(Triplet<double>(i, A_index[i][1], 1.0));
-        triplets.push_back(Triplet<double>(i, A_index[i][2], -1.0));
+    unordered_map<int, int> distIt;
+    unordered_map<int, vector<T>> triplets;
+    for (int i = 0; i < pairIdxV.size(); i++) {
+        int dist = pairIdxV[i][3];
+        int iter = distIt[dist];
+        int cgid_this_idx = pairIdxV[i][1];
+        int cgid_that_idx = pairIdxV[i][2];
+
+        //cout << "dist: " << dist << '\t' << "iter: " << iter << '\t' << "this: " << cgid_this_idx << '\t' << "that: " << cgid_that_idx << endl; 
+        triplets[dist].push_back(Triplet<double>(iter, cgid_this_idx, 1.0));
+        triplets[dist].push_back(Triplet<double>(iter, cgid_that_idx, -1.0));
+        distIt[dist]++;
     }
 
-    SparseMatrix<double> A(A_index.size(), rownames.size());
-    A.setFromTriplets(triplets.begin(), triplets.end());
-
-    SparseMatrix<double, ColMajor> A_ccs = A;
-
-    A.makeCompressed();
 
 
+    cerr << "Calc:\tMatrix multiplication by distance" << endl;
     // substraction matrix build
-    MatrixXd lpmd(A.rows(), columnNames.size()-1);
-    lpmd = A * ilmnMap_mat;
+    vector<MatrixXd> lpmds;
+    unordered_map<int, SparseMatrix<double>> pair_matrixM;
+    for(int i = 0; i < 41; i++){
+        lpmds.emplace_back(distIt[i] + 1, columnNames.size() - 1);
+        lpmds.back().setConstant(i);
+        SparseMatrix<double> pair_matrix(triplets[i].size()/2, ilmnMap_mat.rows());
+        pair_matrix.setFromTriplets(triplets[i].begin(), triplets[i].end());
+        pair_matrixM.emplace(i, pair_matrix);
+        cout << "pair_matrixM[" << i << "]: [" << pair_matrixM[i].rows()  << 'x' << pair_matrixM[i].cols() << ']' << endl;
+        lpmds[i] = pair_matrixM[i] * ilmnMap_mat;
+    }
+
+
 
 
     cerr << "Write:\twhole LPMD result" << endl;
@@ -215,46 +233,25 @@ int main(int argc, char* argv[]) {
 
     ofstream(output);
     output.open(lpmd_res);
-    output << "chrom\tcgids\tpos_dist";
-    for(int i=1; i < columnNames.size(); i++){
+    output << "cgids\tdist";
+    for(int i=1; i < columnNames.size(); i++){   // writing first column names
         output << '\t' << columnNames[i];
-    }
-    output << endl; 
-    for(int i=0; i < A_index.size(); i++){
-        output << distVec[i][0] << '\t' << distVec[i][1] + ":" + distVec[i][2] << '\t' << distVec[i][3];
-        for(int j=0; j < lpmd.cols();j++){
-            output << '\t' << lpmd(i,j);
+    } output << endl; 
+
+    for(int dist=0; dist < 41; dist++){
+        for(int pair_it=0; pair_it < pairIdxV_dist[dist].size(); pair_it++){
+            output << pairIdxV_dist[dist][pair_it][0] + ":" + pairIdxV_dist[dist][pair_it][1] << '\t' << dist;
+            for(int j=0; j < lpmds[dist].cols(); j++){
+                output << '\t' << lpmds[dist](pair_it,j);
+            }
+            output << endl;
         }
-        output << endl;
     }
     output.close();
 
 
 
-    cerr << "Calc:\tCumulative lpmd output" << endl;
-    // cumulative lpmd score Matrix build
-    vector<Triplet<double>> triplets_cum_lpmd;
-    vector<int> t_cum_lpmd;
-    for(int i =0; i<100; i++){
-        t_cum_lpmd.push_back(0);
-    }
-    for(int i=0; i < A_index.size(); i++){
-        triplets_cum_lpmd.push_back(Triplet<double>(A_index[i][3], i, 1.0));
-        t_cum_lpmd[A_index[i][3]-1]++;
-    }
-    SparseMatrix<double> B(100,A_index.size());
-    B.setFromTriplets(triplets_cum_lpmd.begin(), triplets_cum_lpmd.end());
-    B.makeCompressed();
 
-    // Matrix multiplication
-    MatrixXd cum_lpmd(100, columnNames.size()-1);
-    MatrixXd cum_lpmd_mean(100, columnNames.size()-1);
-    cum_lpmd = B * lpmd.cwiseAbs();
-
-    for(int i = 0; i < 100; i++){
-        cum_lpmd_mean.row(i) = cum_lpmd.row(i) / t_cum_lpmd[i];
-
-    }
 
     cerr << "Write:\tCumulative lpmd" << endl;
     string cum_lpmd_res = argv[3];
@@ -266,10 +263,11 @@ int main(int argc, char* argv[]) {
         output_cum_lpmd_res << '\t' << columnNames[i];
     }
     output_cum_lpmd_res << endl;
-    for(int i=0; i < 100; i++){
-        output_cum_lpmd_res << i+1;
-        for(int j=0; j < cum_lpmd_mean.cols(); j++){
-            output_cum_lpmd_res << '\t' << cum_lpmd_mean(i,j);
+    for(int i=2; i < 41; i++){
+        output_cum_lpmd_res << i << '\t' ;
+        for(int j = 0; j < columnNames.size()-1;j++){
+            double mean_val = lpmds[i].col(j).cwiseAbs().mean();
+            output_cum_lpmd_res << mean_val << '\t';
         }
         output_cum_lpmd_res << endl;
     }
@@ -277,19 +275,18 @@ int main(int argc, char* argv[]) {
 
 
 
-
-    cerr << "Write:\tLPMD stats result" << endl;
-    string lpmd_stats = argv[3];
-    lpmd_stats += "_stats.txt";
-    ofstream(output_stats);
-    output_stats.open(lpmd_stats);
-    output_stats << "SampleID\tMean\tMedian\tIQR\tsd" << endl;
-    auto stats = calculateColumnStats(lpmd.cwiseAbs(), columnNames);
-    for(const auto& var : stats){
-        output_stats << var.first << '\t' << var.second.mean << '\t' << var.second.median << '\t' <<  var.second.iqr << '\t' << var.second.std_dev << endl;
-    }
-    output_stats.close();
-
+// 
+//     cerr << "Write:\tLPMD stats result" << endl;
+//     string lpmd_stats = argv[3];
+//     lpmd_stats += "_stats.txt";
+//     ofstream(output_stats);
+//     output_stats.open(lpmd_stats);
+//     output_stats << "SampleID\tMean\tMedian\tIQR\tsd" << endl;
+//     auto stats = calculateColumnStats(lpmd.cwiseAbs(), columnNames);
+//     for(const auto& var : stats){
+//         output_stats << var.first << '\t' << var.second.mean << '\t' << var.second.median << '\t' <<  var.second.iqr << '\t' << var.second.std_dev << endl;
+//     }
+//     output_stats.close();
     return 0;
 }
 
