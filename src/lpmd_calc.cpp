@@ -9,44 +9,38 @@
 #include <Eigen/Dense>
 #include <Eigen/Sparse>
 #include <stdint.h>
-#include <omp.h>
 #include <thread>
+#include <stack>
+#include <ctime>
+
 
 using namespace Eigen;
 using namespace std;
 
+std::stack<clock_t> tictoc_stack;
+
+void tic() {
+    tictoc_stack.push(clock());
+}
+
+void toc() {
+    std::cout << "Time elapsed: "
+              << ((double)(clock() - tictoc_stack.top())) / CLOCKS_PER_SEC
+              << std::endl;
+    tictoc_stack.pop();
+}
+
+
 typedef SparseMatrix<int8_t> SparseMatrix8i;
 typedef Triplet<double> T;
 
-struct ColumnStats {
-    double mean;
-    double median;
-    double iqr;
-    double std_dev;
-};
 
-
-int binarySearch(vector<int> arr, int target) {
-    int left = 0;
-    int right = arr.size() - 1;
-    int mid;
-
-    while (left <= right) {
-        mid = (left + right) / 2;
-
-        if (arr[mid] == target) {
-            return mid;
-        } else if (arr[mid] > target) {
-            right = mid - 1;
-        } else {
-            left = mid + 1;
-        }
-    }
-
-    // If target is not found in arr
-    return -1;
+void usage(){
+    cout << "\nUsage:  lpmd_calc <TOE_lv3.txt> <lpmd_dist_map> <output_prifix>\n\n"
+        << "TOE_lv3.txt\t:  Methylation array level3 file\n"
+        << "lpmd_dist_map\t:  LPMD distance mapping file consisting of {CHR, CGID1, CGID2, DISTANCE}\n"
+        << "output_prefix\t:  Prefix for <prefix>_whole_list.txt, <prefix>_stat.txt\n" << endl;
 }
-
 
 void lpmd_header(string file_name, vector<string> header_list){
     ofstream output;
@@ -59,102 +53,82 @@ void lpmd_header(string file_name, vector<string> header_list){
     output << endl;
 }
 
-map<string, ColumnStats> calculateColumnStats(const MatrixXd& matrix, vector<string> columnNames){
-    map<string, ColumnStats> res;
-    int numCols = matrix.cols(); // get number of columns
-    ColumnStats stats; // create struct to hold stats
 
-    for (int i = 0; i < numCols; i++) {
-        VectorXd col = matrix.col(i); // get current column
-        std::sort(col.data(), col.data() + col.size()); // sort column data
-        int mid = col.size() / 2; // calculate middle index
 
-        // calculate mean
-        stats.mean = col.mean();
-
-        // calculate median
-        stats.median = col.size() % 2 == 0 ? (col(mid - 1) + col(mid)) / 2 : col(mid);
-
-        // calculate interquartile range
-        int q1_idx = col.size() / 4;
-        int q3_idx = 3 * col.size() / 4;
-        double q1 = col(q1_idx);
-        double q3 = col(q3_idx);
-        stats.iqr = q3 - q1;
-
-        // calculate standard deviation
-        double variance = ((col.array() - stats.mean).square().sum()) / (col.size() - 1);
-        stats.std_dev = std::sqrt(variance);
-        res.insert(make_pair(columnNames[i+1], stats));
+vector<string> get_columnNames(ifstream& file_stream){
+    vector<string> return_vector;
+    string line; 
+    getline(file_stream, line);
+    istringstream iss(line);
+    string column; 
+    while(getline(iss, column, '\t')){
+        return_vector.push_back(column);
     }
-
-
-    return res; // return struct of column stats
+    return return_vector;
 }
 
-void usage(){
-    cout << "\nUsage:  lpmd_calc <TOE_lv3.txt> <lpmd_dist_map> <output_prifix>\n\n"
-        << "TOE_lv3.txt\t:  Methylation array level3 file\n"
-        << "lpmd_dist_map\t:  LPMD distance mapping file consisting of {CHR, CGID1, CGID2, DISTANCE}\n"
-        << "output_prefix\t:  Prefix for <prefix>_whole_list.txt, <prefix>_stat.txt\n" << endl;
-}
+
+
+
 
 int main(int argc, char* argv[]) {
     if(argc<4) {usage(); return 1;}
 
-    ifstream file(argv[1]);
-    string line; 
+    tic();
+    /* Reads Methylation file into {met_colnames, met_rownames, met_fields} */; cerr << "Read:\t" << argv[1];
+    vector<string> met_colnames, met_rownames;
+    unordered_map<string, int> met_rownames_index_M;
+    vector<vector<double>> met_fields;
 
-    // <columnNames> allocation
-    vector<string> columnNames;
-    getline(file, line);
-    istringstream iss1(line);
-    string column;
-    while (getline(iss1, column, '\t')){
-        columnNames.push_back(column);
-    }
-     
-
-    // <rownames , fields> read and allocation
-    unordered_map<string, int> rownames;
-    vector<vector<double>> fields;
-    int jj = 0;
-    cerr << "Read:\t" << argv[1] << endl;
+    ifstream file(argv[1]);                                             //open Methylation file
+    met_colnames = get_columnNames(file);                               //get column names {met_colnames}
+    string line;     
+    int row_counter = 0;
     while(getline(file, line)){
-        string line_;
+        int col_counter = 0;
+        vector<double> fields_; 
         istringstream iss1(line);
-        getline(iss1, line_, '\t');
-        rownames.emplace(line_,jj);
-
-        string record;
-        vector<double> lines;
-        int j=0;
-        while(getline(iss1, record, '\t')){
-            lines.push_back(stod(record));
-            j++;
+        string line_;
+        while(getline(iss1, line_, '\t')){                          // allocate first column into {met_rownames_index_M, met_rownames}
+            if(col_counter % met_colnames.size() == 0){
+                met_rownames_index_M.emplace(line_, row_counter);
+                met_rownames.push_back(line_);
+            }
+            else{
+                fields_.push_back(stod(line_));
+            }
+            col_counter++;
         }
-        fields.push_back(lines);
-        jj++;
+        met_fields.push_back(fields_);
+        row_counter++;
     }
+    file.close();
+    cout << "\t\t\t\t\t";
+    toc();
 
 
-    // <ilmnMap_mat> *ptr allocation
-    cerr << "Build:\t" << "Matrix of " << argv[1] << " : " << fields.size() << " x " << columnNames.size()-1 << endl;
-    MatrixXd ilmnMap_mat(fields.size(), columnNames.size()-1);
-    for(int i=0; i < fields.size(); i++){
-        for(int j=1; j < columnNames.size(); j++){
-            double *ptr_field = &fields[i][j-1];
+
+    tic();
+    /*  <ilmnMap_mat> *ptr allocation */; cerr << "Build:\t" << "Matrix of " << argv[1] << " : " << met_fields.size() << " x " << met_colnames.size()-1;
+    MatrixXd ilmnMap_mat(met_fields.size(), met_colnames.size()-1);
+    for(int i=0; i < met_fields.size(); i++){
+        for(int j=1; j < met_colnames.size(); j++){
+            double *ptr_field = &met_fields[i][j-1];
             ilmnMap_mat(i, j-1) = *ptr_field;
         }
     }
-    file.close();
+    cout << "\t\t";
+    toc();
 
 
-    cerr << "Build:\tdistMap into distVec" << endl;
-    // Reading distMap into distVec
-    vector<vector<string>> distVec;
-    vector<string> chr_vec, cgid1_vec, cgid2_vec, distance_vec;
+    tic(); 
+    /* Reading distMap into map_dist */; cerr << "Build:\tdistMap into distVec" ;
+    vector<vector<string>> distVec, map_dist;
+    vector<string> chr_vec, cgid1_vec, cgid2_vec;
+    unordered_map<string, int> map_chr_M, map_cgid1_M, map_cgid2_M, map_dist_M;
+
     ifstream distFile(argv[2]);
+    int row_index = 0;
     while(getline(distFile, line)){
         istringstream iss(line);
         string chr, distance, cgid1, cgid2;
@@ -164,64 +138,61 @@ int main(int argc, char* argv[]) {
         getline(iss, distance, '\t');
 
         distVec.push_back({chr, cgid1, cgid2, distance});
-        chr_vec.push_back(chr);
-        cgid1_vec.push_back(cgid1);
-        cgid2_vec.push_back(cgid2);
-        distance_vec.push_back(distance);
+        map_cgid1_M.emplace(cgid1, row_index);
+        map_cgid2_M.emplace(cgid2, row_index);
+        row_index++;
     }
     distFile.close();
+    cout << "\t\t\t\t\t\t\t\t\t";
+    toc();
+    
+    
 
-    cerr << "Build:\tSparse substraction matrix" << endl;
-
-    // Making sparse substraction matrix
-
-    vector<vector<int>> pairIdxV;
-    unordered_map<int, vector<vector<string>>> pairIdxV_dist;
+    tic();
+    /* Parsing bi-existance pairs from mat_rownames with map_dist in {pairIdx_dist_M}*/; cerr << "Build:\tSparse substraction matrix" ;
+    vector<vector<int>> met_pairIdxV;
+    map<int, vector<vector<string>>> met_pairIdx_dist_M;
+    map<int, vector<T>> triplets;
     for (int i=0; i < distVec.size(); i++){
+        string& chr = distVec[i][0];
         string& cgid_this = distVec[i][1];
         string& cgid_that = distVec[i][2];
-        string& cgid_dist = distVec[i][3];
+        int cgid_dist = stoi(distVec[i][3]);
+        int index_cgid1 = met_rownames_index_M[cgid_this];
+        int index_cgid2 = met_rownames_index_M[cgid_that];
 
-        auto index_this_it = rownames.find(cgid_this);
-        auto index_that_it = rownames.find(cgid_that);
-        if(index_that_it != rownames.end() && index_this_it != rownames.end()){
-            int index_this = rownames[cgid_this];
-            int index_that = rownames[cgid_that];
-            pairIdxV.push_back({i, index_this, index_that, stoi(cgid_dist)});
-            pairIdxV_dist[stoi(cgid_dist)].push_back({cgid_this, cgid_that});
+        if(index_cgid1 != 0 && index_cgid2 != 0){
+            met_pairIdxV.push_back({index_cgid1, index_cgid2, cgid_dist});
+            vector<string> temp_met_pairIdx_dist_M = {chr, to_string(index_cgid1), to_string(index_cgid2)};
+            met_pairIdx_dist_M[cgid_dist].push_back(temp_met_pairIdx_dist_M);
         }
     }
 
-    unordered_map<int, int> distIt;
-    unordered_map<int, vector<T>> triplets;
-    for (int i = 0; i < pairIdxV.size(); i++) {
-        int dist = pairIdxV[i][3];
-        int iter = distIt[dist];
-        int cgid_this_idx = pairIdxV[i][1];
-        int cgid_that_idx = pairIdxV[i][2];
-
-        //cout << "dist: " << dist << '\t' << "iter: " << iter << '\t' << "this: " << cgid_this_idx << '\t' << "that: " << cgid_that_idx << endl; 
-        triplets[dist].push_back(Triplet<double>(iter, cgid_this_idx, 1.0));
-        triplets[dist].push_back(Triplet<double>(iter, cgid_that_idx, -1.0));
-        distIt[dist]++;
+    for(int dist = 2; dist < 41; dist++){
+        for(int row = 0; row < met_pairIdx_dist_M[dist].size(); row++){
+            triplets[dist].push_back(T(row, stoi(met_pairIdx_dist_M[dist][row][1]), 1.0));
+            triplets[dist].push_back(T(row, stoi(met_pairIdx_dist_M[dist][row][2]), -1.0));
+        }
     }
+    SparseMatrix8i pair_matrix(triplets[2].size()/2, met_rownames.size());
+    pair_matrix.setFromTriplets(triplets[2].begin(), triplets[2].end());
+    cout << "\t\t\t\t\t\t\t\t";
+    toc();
 
 
 
-    cerr << "Calc:\tMatrix multiplication by distance" << endl;
-    // substraction matrix build
-    vector<MatrixXd> lpmds;
+    /* substraction matrix build */; cerr << "Calc:\tMatrix multiplication by distance" << endl;
+    unordered_map<int, MatrixXd> lpmds;
     unordered_map<int, SparseMatrix<double>> pair_matrixM;
-    for(int i = 0; i < 41; i++){
-        lpmds.emplace_back(distIt[i] + 1, columnNames.size() - 1);
-        lpmds.back().setConstant(i);
-        SparseMatrix<double> pair_matrix(triplets[i].size()/2, ilmnMap_mat.rows());
-        pair_matrix.setFromTriplets(triplets[i].begin(), triplets[i].end());
-        pair_matrixM.emplace(i, pair_matrix);
-        cout << "pair_matrixM[" << i << "]: [" << pair_matrixM[i].rows()  << 'x' << pair_matrixM[i].cols() << ']' << endl;
-        lpmds[i] = pair_matrixM[i] * ilmnMap_mat;
+    for(int dist = 2; dist < 41; dist++){
+        //lpmds.emplace_back(dist, met_colnames.size());
+        //lpmds.back().setConstant(dist);
+        SparseMatrix<double> pair_matrix(triplets[dist].size()/2, met_rownames.size());
+        pair_matrix.setFromTriplets(triplets[dist].begin(), triplets[dist].end());
+        pair_matrixM.emplace(dist, pair_matrix);
+        cout << "pair_matrixM[" << dist << "]: [" << pair_matrixM[dist].rows()  << 'x' << pair_matrixM[dist].cols() << ']' << endl;        
+        lpmds[dist] = pair_matrixM[dist] * ilmnMap_mat;
     }
-
 
 
 
@@ -229,20 +200,24 @@ int main(int argc, char* argv[]) {
     // writing whole lpmd output
     string lpmd_res = argv[3];
     lpmd_res += "_whole_list.txt";
-    lpmd_header(lpmd_res, columnNames);
 
     ofstream(output);
     output.open(lpmd_res);
-    output << "cgids\tdist";
-    for(int i=1; i < columnNames.size(); i++){   // writing first column names
-        output << '\t' << columnNames[i];
+    output << "chr\tcgids\tdist";
+    for(int i=1; i < met_colnames.size(); i++){   // writing first column names
+        output << '\t' << met_colnames[i];
     } output << endl; 
 
-    for(int dist=0; dist < 41; dist++){
-        for(int pair_it=0; pair_it < pairIdxV_dist[dist].size(); pair_it++){
-            output << pairIdxV_dist[dist][pair_it][0] + ":" + pairIdxV_dist[dist][pair_it][1] << '\t' << dist;
-            for(int j=0; j < lpmds[dist].cols(); j++){
-                output << '\t' << lpmds[dist](pair_it,j);
+    for(int dist = 2; dist < 41; dist++){
+        for(int row = 0; row < lpmds[dist].rows(); row++){
+            output << met_pairIdx_dist_M[dist][row][0] 
+                << '\t' << met_rownames[stoi(met_pairIdx_dist_M[dist][row][1])]
+                << ':' << met_rownames[stoi(met_pairIdx_dist_M[dist][row][2])] 
+                << '\t' << dist;
+
+
+            for(int col = 0; col < lpmds[dist].cols(); col++){
+                output << '\t' << lpmds[dist](row,col);
             }
             output << endl;
         }
@@ -259,15 +234,15 @@ int main(int argc, char* argv[]) {
     ofstream(output_cum_lpmd_res);
     output_cum_lpmd_res.open(cum_lpmd_res); 
     output_cum_lpmd_res << "Dist";
-    for(int i=1; i < columnNames.size(); i++){
-        output_cum_lpmd_res << '\t' << columnNames[i];
+    for(int i=1; i < met_colnames.size(); i++){
+        output_cum_lpmd_res << '\t' << met_colnames[i];
     }
     output_cum_lpmd_res << endl;
     for(int i=2; i < 41; i++){
-        output_cum_lpmd_res << i << '\t' ;
-        for(int j = 0; j < columnNames.size()-1;j++){
+        output_cum_lpmd_res << i;
+        for(int j = 0; j < met_colnames.size()-1;j++){
             double mean_val = lpmds[i].col(j).cwiseAbs().mean();
-            output_cum_lpmd_res << mean_val << '\t';
+            output_cum_lpmd_res << '\t' << mean_val;
         }
         output_cum_lpmd_res << endl;
     }
@@ -282,11 +257,12 @@ int main(int argc, char* argv[]) {
 //     ofstream(output_stats);
 //     output_stats.open(lpmd_stats);
 //     output_stats << "SampleID\tMean\tMedian\tIQR\tsd" << endl;
-//     auto stats = calculateColumnStats(lpmd.cwiseAbs(), columnNames);
+//     auto stats = calculateColumnStats(lpmd.cwiseAbs(), met_colnames);
 //     for(const auto& var : stats){
 //         output_stats << var.first << '\t' << var.second.mean << '\t' << var.second.median << '\t' <<  var.second.iqr << '\t' << var.second.std_dev << endl;
 //     }
 //     output_stats.close();
     return 0;
 }
+
 
